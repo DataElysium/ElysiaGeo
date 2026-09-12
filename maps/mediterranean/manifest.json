@@ -1,0 +1,17 @@
+{
+  "source": "NOAA ETOPO1 Ice Surface, sampled every third grid node",
+  "source_url": "https://coastwatch.pfeg.noaa.gov/erddap/griddap/etopo180.csv?altitude%5B(25):3:(50)%5D%5B(-12):3:(38)%5D",
+  "source_sha256": "4a2534cea2c5dbefcfa89f3122c35e8c1dc969592665122cd7db960727ab6e81",
+  "geometry_sha256": "9091249257026f51b98cd3121448b727a8041e0dc943e02726fea5380b0b699d",
+  "coverage_centres": [
+    -12,
+    25,
+    38,
+    50
+  ],
+  "spacing_degrees": 0.05,
+  "vertical_reference": "Mean sea level, as declared by ETOPO1; not an EGM conversion",
+  "format": "ELYHGT01",
+  "columns": 1001,
+  "rows": 501
+}

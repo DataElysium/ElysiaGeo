@@ -1,0 +1,19 @@
+{
+  "format": "ELYGEO01",
+  "geometry": "land.elygeo",
+  "coordinates": "WGS84 longitude/latitude degrees; dateline-split polygons",
+  "coverage": [
+    -180,
+    -90,
+    180,
+    90
+  ],
+  "scale_denominator": 50000000,
+  "source_url": "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/ca96624a56bd078437bca8184e78163e5039ad19/geojson/ne_50m_land.geojson",
+  "source_sha256": "e874b27a51d146452be360cafb3cc50c86001074a67d534113e6534682f9826b",
+  "geometry_sha256": "856946968ef357e06549c9b82ef8cd6adb68d4a822c83d28e7ff98f36d19a7dd",
+  "polygons": 1421,
+  "semantics": "Generalized continental land polygons; inland water may be included in land",
+  "elevation": null,
+  "bathymetry": null
+}
