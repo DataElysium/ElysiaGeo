@@ -110,7 +110,7 @@ during initial implementation; other platforms remain to be tested.
 
 `Heightmap` reads tiled, signed float32 height rasters independently of coastlines,
 ECS and graphics. Use separate packages for different layers or resolutions;
-there is no automatic LOD selection or layer catalog yet. Negative seabed heights
+`HeightCatalog` combines them with coverage/NoData fallback. Negative seabed heights
 use the same representation as positive land heights. They are not automatically
 converted into submarine depth or water classification.
 
@@ -129,7 +129,7 @@ auto tile = terrain.read_tile(0, 0); // Owns a contiguous, north-to-south float 
 Opening validates metadata and file length without loading all samples. Tile reads
 validate the data they consume. `sample` opens the file and reads up to four cells;
 it is a convenience API, not a high-throughput cached sampler. Keep `read_tile`
-buffers in an application cache for mesh generation or bulk processing. The library
+buffers in an application cache for mesh generation or bulk processing. This reader
 does not retain buffers, start background work or require an ECS tile entity.
 Const calls may run concurrently provided the package is not modified externally.
 
@@ -149,6 +149,44 @@ reference from the source metadata, not from its horizontal coordinate system.
 The optional Mediterranean example below supplies real elevation and seabed data
 for the viewer. The core library remains independent of the relief renderer.
 
+
+## Cached layers and global relief
+
+```cpp
+#include <elysia_geo/height_catalog.hpp>
+using namespace elysia::geo;
+HeightCatalog heights({"maps/global-relief/terrain.elyhgt",
+                       "maps/mediterranean/terrain.elyhgt"},
+                      HeightReference::mean_sea_level, 8 * 1024 * 1024);
+if (auto sample = heights.sample(Position{150, 30, 0})) {
+    auto metres = sample->height.metres;
+    auto angular_resolution = sample->height.longitude_step;
+    auto source = heights.layers()[sample->layer].source;
+}
+```
+
+The finest angular cell area wins; equal resolutions prefer the smaller grid,
+then input order. NoData or uncovered positions fall back to the next source;
+corruption and I/O errors throw. All packages must match the explicitly selected
+vertical reference. This is not a datum converter or a screen-space rendering LOD.
+
+The LRU budget covers retained float raster payload across all layers, not container
+metadata or transient reads. An oversized tile is sampled without retaining it;
+zero budget disables retention. `cache_stats()` exposes usage. `sample(span)` handles
+bulk queries; const queries are thread-safe, with a shared mutex serializing cache
+access and I/O. Files must remain unchanged while the catalogue is alive. No worker
+threads or ECS dependency are introduced.
+
+`maps/global-relief/terrain.elyhgt` supplies worldwide 0.05-degree ETOPO1 data,
+about 108 MB on disk, loaded by source tile. Restore the committed compressed package
+offline with `python3 tools/fetch_global_relief.py --restore-packaged` (standard Python only).
+The expanded raster is ignored by Git. To rebuild from NOAA instead, install Python `numpy scipy`, then
+run `python3 tools/fetch_global_relief.py` to rebuild it (about 52 MB download).
+Attribution, hashes and longitude-seam preprocessing accompany the package.
+The base has no missing source nodes; it is still sampled coarse terrain, not
+an authoritative harbour or under-ice chart. More detailed packages can override it.
+`geo-tests` exercises real global coverage as well as synthetic fallback/cache cases,
+so install/rebuild the global package before running the full suite.
 
 ## Shaded-relief viewer
 

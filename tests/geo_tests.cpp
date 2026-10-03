@@ -115,7 +115,8 @@ void earth() {
 }
 }
 void heightmap_tests();
+void height_catalog_tests();
 int main() {
-    try {coordinates();synthetic();earth();heightmap_tests();std::cout<<"Passed "<<checks<<" geography checks\n";}
+    try {coordinates();synthetic();earth();heightmap_tests();height_catalog_tests();std::cout<<"Passed "<<checks<<" geography checks\n";}
     catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}
 }

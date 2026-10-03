@@ -2,3 +2,5 @@
 /build/
 __pycache__/
 *.pyc
+
+/maps/global-relief/terrain.elyhgt
