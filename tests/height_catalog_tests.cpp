@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <elysia_geo/height_catalog.hpp>
+#include <elysia_geo/map.hpp>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -66,6 +67,13 @@ void height_catalog_tests() {
     HeightCatalog catalog({base, detail}, HeightReference::mean_sea_level, 32);
     check(catalog.layers()[0].source == detail, "Finest layer must win independent of input order");
     check(catalog.cache_stats().tiles == 0, "Catalogue open must not read raster payload");
+    HeightCatalog complete({base}, HeightReference::mean_sea_level, 32);
+    check(complete.upper_bound({10, 0, 12, 2}) == -40,
+          "Height certificate must include actual tile peaks, not just query samples");
+    check(!complete.upper_bound({9, 0, 12, 2}), "Partial coverage cannot certify clearance");
+    check(!catalog.upper_bound({10, 1, 11, 2}), "NoData must disable the fast certificate");
+    check(complete.cache_stats().bytes <= 32, "Bound scan must retain the cache byte limit");
+    rejects([&] { complete.upper_bound({10, 2, 12, 1}); });
     auto z = catalog.sample({10.25, 2, 0});
     check(z && z->layer == 0 && z->height.metres == -95,
           "Fine sample or zero-weight NoData failed");
@@ -100,6 +108,9 @@ void height_catalog_tests() {
               uncached.cache_stats().bytes == 0,
           "Zero budget must allow transient reads without retaining tiles");
     auto date = f.write("date", 179, 1, false);
+    HeightCatalog seam_bound({date}, HeightReference::mean_sea_level);
+    check(seam_bound.upper_bound({179.5, 0, -179.5, 2}) == -40,
+          "Conservative tile bounds must cover both sides of the date line");
     HeightCatalog dateline({date}, HeightReference::mean_sea_level);
     check(dateline.sample({-179, 0, 0})->height.metres == -40, "Dateline coverage failed");
     // Compare the cached implementation against the independent uncached reader.

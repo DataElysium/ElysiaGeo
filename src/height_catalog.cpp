@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <elysia_geo/height_catalog.hpp>
+#include <elysia_geo/map.hpp>
 #include <list>
 #include <map>
 #include <mutex>
@@ -127,5 +128,45 @@ HeightCatalog::sample(std::span<const Position> points) const {
 HeightCacheStats HeightCatalog::cache_stats() const {
     std::lock_guard lock(impl_->mutex);
     return {impl_->cache.size(), impl_->bytes, impl_->budget};
+}
+std::optional<double> HeightCatalog::upper_bound(Bounds bounds) const {
+    if (!std::isfinite(bounds.west) || !std::isfinite(bounds.east) ||
+        !std::isfinite(bounds.south) || !std::isfinite(bounds.north) ||
+        bounds.south < -90 || bounds.north > 90 || bounds.south > bounds.north ||
+        bounds.west < -180 || bounds.west > 180 || bounds.east < -180 || bounds.east > 180)
+        throw std::invalid_argument("Invalid height bounds");
+    std::lock_guard lock(impl_->mutex);
+    const std::vector<std::pair<double, double>> intervals = bounds.west <= bounds.east
+        ? std::vector<std::pair<double, double>>{{bounds.west, bounds.east}}
+        : std::vector<std::pair<double, double>>{{bounds.west, 180}, {-180, bounds.east}};
+    double maximum = -INFINITY;
+    for (const auto& [west, east] : intervals) {
+        bool covered = false;
+        for (std::size_t layer = 0; layer < impl_->layers.size(); ++layer) {
+            const auto& g = impl_->layers[layer].grid;
+            const double right = g.west + (g.columns - 1) * g.longitude_step;
+            const double bottom = g.north - (g.rows - 1) * g.latitude_step;
+            if (bounds.north < bottom || bounds.south > g.north) continue;
+            for (int shift : {-360, 0, 360}) {
+                const double lo = west + shift, hi = east + shift;
+                if (hi < g.west || lo > right) continue;
+                const auto x0 = std::uint32_t(std::clamp(std::floor((lo - g.west) / g.longitude_step), 0., double(g.columns - 1)));
+                const auto x1 = std::uint32_t(std::clamp(std::ceil((hi - g.west) / g.longitude_step), 0., double(g.columns - 1)));
+                const auto y0 = std::uint32_t(std::clamp(std::floor((g.north - bounds.north) / g.latitude_step), 0., double(g.rows - 1)));
+                const auto y1 = std::uint32_t(std::clamp(std::ceil((g.north - bounds.south) / g.latitude_step), 0., double(g.rows - 1)));
+                for (auto y = y0 / g.tile_size; y <= y1 / g.tile_size; ++y)
+                    for (auto x = x0 / g.tile_size; x <= x1 / g.tile_size; ++x) {
+                        const auto tile = impl_->tile(layer, x, y);
+                        for (float value : tile->metres) {
+                            if (!std::isfinite(value)) return {};
+                            maximum = std::max(maximum, double(value));
+                        }
+                    }
+                covered |= lo >= g.west && hi <= right && bounds.south >= bottom && bounds.north <= g.north;
+            }
+        }
+        if (!covered) return {};
+    }
+    return std::isfinite(maximum) ? std::optional<double>{maximum} : std::nullopt;
 }
 } // namespace elysia::geo

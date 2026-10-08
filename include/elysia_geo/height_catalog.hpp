@@ -4,6 +4,7 @@
 #include <span>
 
 namespace elysia::geo {
+struct Bounds;
 struct HeightLayer {
     std::filesystem::path source;
     HeightGrid grid;
@@ -32,6 +33,9 @@ class HeightCatalog {
     std::optional<CatalogSample> sample(Position) const;
     std::vector<std::optional<CatalogSample>> sample(std::span<const Position>) const;
     HeightCacheStats cache_stats() const;
+    // Conservative maximum over every overlapping source tile/layer, including
+    // bilinear neighbours. Missing coverage/NoData returns nullopt. Never a sampled estimate.
+    std::optional<double> upper_bound(Bounds) const;
 
   private:
     struct Impl;
