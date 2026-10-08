@@ -14,6 +14,7 @@ struct HeightCatalog::Impl {
     struct Entry {
         std::shared_ptr<const HeightTile> tile;
         std::list<Key>::iterator recent;
+        std::optional<double> maximum;
     };
     std::vector<Heightmap> maps;
     std::vector<HeightLayer> layers;
@@ -29,6 +30,11 @@ struct HeightCatalog::Impl {
             return it->second.tile;
         }
         auto data = std::make_shared<HeightTile>(maps[layer].read_tile(x, y));
+        std::optional<double> maximum = -INFINITY;
+        for (float value : data->metres) {
+            if (!std::isfinite(value)) { maximum.reset(); break; }
+            *maximum = std::max(*maximum, double(value));
+        }
         auto size = data->metres.size() * sizeof(float);
         // An oversized tile can be read transiently, but never retained over
         // budget.
@@ -42,7 +48,7 @@ struct HeightCatalog::Impl {
         }
         recency.push_front(key);
         try {
-            cache.emplace(key, Entry{data, recency.begin()});
+            cache.emplace(key, Entry{data, recency.begin(), maximum});
         } catch (...) {
             recency.pop_front();
             throw;
@@ -157,9 +163,15 @@ std::optional<double> HeightCatalog::upper_bound(Bounds bounds) const {
                 for (auto y = y0 / g.tile_size; y <= y1 / g.tile_size; ++y)
                     for (auto x = x0 / g.tile_size; x <= x1 / g.tile_size; ++x) {
                         const auto tile = impl_->tile(layer, x, y);
-                        for (float value : tile->metres) {
-                            if (!std::isfinite(value)) return {};
-                            maximum = std::max(maximum, double(value));
+                        const auto cached = impl_->cache.find(Impl::Key{layer, x, y});
+                        if (cached != impl_->cache.end()) {
+                            if (!cached->second.maximum) return {};
+                            maximum = std::max(maximum, *cached->second.maximum);
+                        } else {
+                            for (float value : tile->metres) {
+                                if (!std::isfinite(value)) return {};
+                                maximum = std::max(maximum, double(value));
+                            }
                         }
                     }
                 covered |= lo >= g.west && hi <= right && bounds.south >= bottom && bounds.north <= g.north;
