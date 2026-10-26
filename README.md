@@ -77,6 +77,11 @@ builds a 10-degree uniform spatial index. The viewer makes a separate 4096x2048
 raster cache, then draws vector outlines. Zoom does not change server query data.
 No imagery or cached GPU assets live in the library.
 
+Point classification also indexes each coastline ring into latitude bands. Queries test only
+edges in the point's band; hole and boundary rules remain identical to a complete edge scan.
+Index storage is capped at four edge references per segment, with a linear fallback for
+pathological overlapping edges. Loading builds the index once; concurrent queries only read it.
+
 This is **generalized continental land**, not a navigational chart. Inland lakes
 may be represented as land, small islands may be absent, and zooming does not add
 source detail. The bundled geometry is 2D. Optional height raster storage and sampling are
@@ -150,7 +155,7 @@ The optional Mediterranean example below supplies real elevation and seabed data
 for the viewer. The core library remains independent of the relief renderer.
 
 
-## Cached layers and global relief
+## Resident and cached height layers
 
 ```cpp
 #include <elysia_geo/height_catalog.hpp>
@@ -165,10 +170,30 @@ if (auto sample = heights.sample(Position{150, 30, 0})) {
 }
 ```
 
+For a fixed terrain dataset, load it once and share the immutable catalogue:
+
+```cpp
+auto heights = HeightCatalog::resident({"maps/global-relief/terrain.elyhgt",
+                                        "maps/mediterranean/terrain.elyhgt"},
+                                       HeightReference::mean_sea_level);
+```
+
+`resident()` reads all tiles sequentially and computes their maxima before returning.
+Queries use array indexing without cache locks, LRU updates or further file reads.
+Storage lasts for the catalogue's lifetime; keep it at application scope and share it
+across regions and query threads. The bundled layers occupy about 105.31 MiB of float
+allocation, shared once. `cache_stats()` reports the fixed resident allocation as both
+`bytes` and `budget_bytes`. The regular constructor retains byte-bounded LRU loading.
+
 The finest angular cell area wins; equal resolutions prefer the smaller grid,
 then input order. NoData or uncovered positions fall back to the next source;
 corruption and I/O errors throw. All packages must match the explicitly selected
 vertical reference. This is not a datum converter or a screen-space rendering LOD.
+
+`upper_bound(bounds)` provides a conservative height ceiling for visibility and collision
+queries. Small rectangles evaluate the bilinear surface at clipped cell corners and internal
+grid vertices. Large rectangles use source samples and cached tile maxima. Missing coverage
+or relevant NoData returns `nullopt`; date-line bounds and overlapping layers are included.
 
 The LRU budget covers retained float raster payload across all layers, not container
 metadata or transient reads. An oversized tile is sampled without retaining it;

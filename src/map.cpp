@@ -26,18 +26,47 @@ std::uint32_t count(std::istream& in, std::uint32_t limit) {
 }
 double number(std::istream& in) { return std::bit_cast<double>(read_uint(in,8)); }
 // 0 outside, 1 inside, 2 exactly on a segment within numerical tolerance.
-int ring_test(const std::vector<Point>& ring, Point p) {
+int ring_test(const std::vector<Point>& ring, std::span<const std::uint32_t> edges, Point p) {
     bool inside=false;
-    for(std::size_t i=1;i<ring.size();++i) {
+    for(auto i:edges) {
         auto a=ring[i-1], b=ring[i];
         double dx=b.x-a.x, dy=b.y-a.y;
-        if(std::abs(dx*(p.y-a.y)-dy*(p.x-a.x))<=1e-10*std::max(1.0,std::hypot(dx,dy)) &&
-           p.x>=std::min(a.x,b.x)-1e-10 && p.x<=std::max(a.x,b.x)+1e-10 &&
-           p.y>=std::min(a.y,b.y)-1e-10 && p.y<=std::max(a.y,b.y)+1e-10) return 2;
+        if(p.x>=std::min(a.x,b.x)-1e-10 && p.x<=std::max(a.x,b.x)+1e-10 &&
+           p.y>=std::min(a.y,b.y)-1e-10 && p.y<=std::max(a.y,b.y)+1e-10 &&
+           std::abs(dx*(p.y-a.y)-dy*(p.x-a.x))<=1e-10*std::max(1.0,std::hypot(dx,dy))) return 2;
         if((a.y>p.y)!=(b.y>p.y) && p.x<(b.x-a.x)*(p.y-a.y)/(b.y-a.y)+a.x) inside=!inside;
     }
     return inside?1:0;
 }
+}
+std::size_t MapDataset::RingIndex::band(double latitude) const {
+    if (north == south) return 0;
+    const double position = (latitude - south) / (north - south) * bands.size();
+    return static_cast<std::size_t>(std::clamp(position, 0., double(bands.size() - 1)));
+}
+MapDataset::RingIndex::RingIndex(const std::vector<Point>& ring) {
+    south = north = ring.front().y;
+    for (auto p : ring) {
+        south = std::min(south, p.y);
+        north = std::max(north, p.y);
+    }
+    bands.resize(std::clamp<std::size_t>((ring.size() - 1) / 32, 1, 256));
+    std::size_t references = 0;
+    for (std::uint32_t i = 1; i < ring.size(); ++i) {
+        // Include the original segment-boundary tolerance on both sides of a band.
+        const auto first = band(std::min(ring[i - 1].y, ring[i].y) - 1e-10);
+        const auto last = band(std::max(ring[i - 1].y, ring[i].y) + 1e-10);
+        references += last - first + 1;
+        if (references > 4 * ring.size()) {
+            // Highly overlapping long edges use a bounded linear fallback.
+            bands.clear();
+            bands.resize(1);
+            for (std::uint32_t edge = 1; edge < ring.size(); ++edge)
+                bands.front().push_back(edge);
+            return;
+        }
+        for (auto j = first; j <= last; ++j) bands[j].push_back(i);
+    }
 }
 MapDataset MapDataset::open(const std::filesystem::path& path) {
     std::ifstream in(path,std::ios::binary);
@@ -73,6 +102,8 @@ MapDataset MapDataset::open(const std::filesystem::path& path) {
         for(int y=row(p.bounds.south);y<=row(p.bounds.north);++y)
             for(int x=column(p.bounds.west);x<=column(p.bounds.east);++x)
                 result.cells_[y*36+x].push_back(i);
+        auto& indices = result.ring_indices_.emplace_back();
+        for (const auto& ring : p.rings) indices.emplace_back(ring);
         result.polygons_.push_back(std::move(p));
     }
     if(in.peek()!=EOF) throw std::runtime_error("Trailing data in geography package");
@@ -85,12 +116,17 @@ Surface MapDataset::surface(Position p) const {
         for(auto i:cells_[row(p.latitude_deg)*36+column(lon)]) {
             const auto& polygon=polygons_[i]; auto b=polygon.bounds;
             if(lon<b.west||lon>b.east||p.latitude_deg<b.south||p.latitude_deg>b.north) continue;
-            int outer=ring_test(polygon.rings.front(),{lon,p.latitude_deg});
+            auto test_ring = [&](std::size_t ring) {
+                const auto& index = ring_indices_[i][ring];
+                return ring_test(polygon.rings[ring], index.bands[index.band(p.latitude_deg)],
+                                 {lon, p.latitude_deg});
+            };
+            int outer=test_ring(0);
             if(outer==2) { boundary=true; continue; }
             if(!outer) continue;
             bool hole=false;
             for(std::size_t j=1;j<polygon.rings.size();++j) {
-                int value=ring_test(polygon.rings[j],{lon,p.latitude_deg});
+                int value=test_ring(j);
                 if(value==2) boundary=true;
                 if(value) {hole=true; break;}
             }

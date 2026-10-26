@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <random>
 #include <stdexcept>
 
 using namespace elysia::geo;
@@ -59,6 +60,82 @@ void coordinates() {
     rejects([]{wrap_longitude(std::numeric_limits<double>::infinity());},"infinite longitude");
     rejects([]{from_ecef({0,0,0});},"Earth centre undefined");
 }
+Surface surface_oracle(const MapDataset& map, Position p) {
+    auto ring_test = [&](const std::vector<Point>& ring) {
+        bool inside = false;
+        for (std::size_t i = 1; i < ring.size(); ++i) {
+            const auto a = ring[i - 1], b = ring[i];
+            const double dx = b.x - a.x, dy = b.y - a.y;
+            if (std::abs(dx * (p.latitude_deg - a.y) - dy * (p.longitude_deg - a.x)) <=
+                    1e-10 * std::max(1., std::hypot(dx, dy)) &&
+                p.longitude_deg >= std::min(a.x, b.x) - 1e-10 &&
+                p.longitude_deg <= std::max(a.x, b.x) + 1e-10 &&
+                p.latitude_deg >= std::min(a.y, b.y) - 1e-10 &&
+                p.latitude_deg <= std::max(a.y, b.y) + 1e-10) return 2;
+            if ((a.y > p.latitude_deg) != (b.y > p.latitude_deg) &&
+                p.longitude_deg < dx * (p.latitude_deg - a.y) / dy + a.x) inside = !inside;
+        }
+        return inside ? 1 : 0;
+    };
+    bool boundary = false;
+    for (const auto& polygon : map.polygons()) {
+        const auto b = polygon.bounds;
+        if (p.longitude_deg < b.west || p.longitude_deg > b.east ||
+            p.latitude_deg < b.south || p.latitude_deg > b.north) continue;
+        const int outer = ring_test(polygon.rings.front());
+        if (outer == 2) { boundary = true; continue; }
+        if (!outer) continue;
+        bool hole = false;
+        for (std::size_t i = 1; i < polygon.rings.size(); ++i) {
+            const int hit = ring_test(polygon.rings[i]);
+            if (hit == 2) boundary = true;
+            if (hit) { hole = true; break; }
+        }
+        if (!hole) return Surface::land;
+    }
+    return boundary ? Surface::boundary : Surface::water;
+}
+void indexed_surface(const MapDataset& map) {
+    std::mt19937 rng(1979);
+    std::uniform_real_distribution<double> longitude(-179.99, 179.99), latitude(-89.99, 89.99);
+    for (int i = 0; i < 2000; ++i) {
+        Position p{longitude(rng), latitude(rng), 0};
+        check(map.surface(p) == surface_oracle(map, p), "indexed surface differs from full coastline scan");
+    }
+    for (const auto& polygon : map.polygons()) for (const auto& ring : polygon.rings)
+        for (std::size_t i = 1; i < ring.size(); i += std::max<std::size_t>(1, ring.size() / 8)) {
+            const auto a = ring[i - 1], b = ring[i];
+            for (const double offset : {0., -5e-11, 5e-11}) {
+                Position p{(a.x + b.x) * .5, (a.y + b.y) * .5 + offset, 0};
+                if (p.longitude_deg <= -180 || p.longitude_deg >= 180 || std::abs(p.latitude_deg) > 90) continue;
+                check(map.surface(p) == surface_oracle(map, p), "indexed coastline boundary differs from full scan");
+            }
+        }
+}
+void indexed_degenerate_rings() {
+    for (bool flat : {false, true}) {
+        Temporary file;
+        {
+            std::ofstream out(file.path, std::ios::binary);
+            out.write("ELYGEO01", 8);
+            integer(out, 1);
+            integer(out, 1);
+            integer(out, 1025);
+            // Long alternating edges exercise the bounded fallback; flat rings have zero height.
+            for (int i = 0; i <= 1024; ++i) {
+                const double x = i == 1024 ? 0 : 20. * i / 1024;
+                const double y = flat ? 10 : (i % 2 ? 20 : 0);
+                integer(out, std::bit_cast<std::uint64_t>(x), 8);
+                integer(out, std::bit_cast<std::uint64_t>(y), 8);
+            }
+        }
+        auto map = MapDataset::open(file.path);
+        for (int y = 0; y <= 40; ++y) for (int x = 0; x <= 40; ++x) {
+            Position p{x * .5, y * .5, 0};
+            check(map.surface(p) == surface_oracle(map, p), "long or flat edges preserve surface classification");
+        }
+    }
+}
 void synthetic() {
     Temporary file;
     {
@@ -92,6 +169,7 @@ void synthetic() {
 }
 void earth() {
     auto map=MapDataset::open(ELYSIA_MAP_FILE);
+    indexed_surface(map);
     check(map.polygons().size()==1421,"pinned Earth polygon count");
     for(auto p:{Position{-100,40,0},Position{15,23,0},Position{135,-25,0},Position{-19,65,0},Position{0,-89,0}})
         check(map.surface(p)==Surface::land,"known mainland or island");
@@ -117,6 +195,6 @@ void earth() {
 void heightmap_tests();
 void height_catalog_tests();
 int main() {
-    try {coordinates();synthetic();earth();heightmap_tests();height_catalog_tests();std::cout<<"Passed "<<checks<<" geography checks\n";}
+    try {coordinates();synthetic();indexed_degenerate_rings();earth();heightmap_tests();height_catalog_tests();std::cout<<"Passed "<<checks<<" geography checks\n";}
     catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}
 }
