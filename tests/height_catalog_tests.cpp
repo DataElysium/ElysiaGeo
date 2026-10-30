@@ -6,6 +6,7 @@
 #include <elysia_geo/map.hpp>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <stdexcept>
 #include <thread>
 
@@ -61,7 +62,9 @@ struct Fixture {
     }
 };
 } // namespace
+void height_pyramid_tests();
 void height_catalog_tests() {
+    height_pyramid_tests();
     using namespace elysia::geo;
     Fixture f;
     auto base = f.write("base", 10, 1, false);
@@ -208,6 +211,59 @@ void height_catalog_tests() {
         integer(out, std::bit_cast<std::uint32_t>(INFINITY), 4);
     }
     rejects([&] { HeightCatalog::resident({corrupt}, HeightReference::mean_sea_level); });
+    for (bool hole : {false, true}) {
+        const auto path = f.root / (hole ? "wide-hole" : "wide");
+        {
+            std::ofstream out(path, std::ios::binary);
+            out.write("ELYHGT01", 8);
+            for (auto n : {65u, 49u, 16u, 4u})
+                integer(out, n, 4);
+            for (double n : {179., 2., .05, .05})
+                integer(out, std::bit_cast<std::uint64_t>(n), 8);
+            for (unsigned ty = 0; ty < 4; ++ty)
+                for (unsigned tx = 0; tx < 5; ++tx)
+                    for (unsigned y = 0; y < 16; ++y)
+                        for (unsigned x = 0; x < 16; ++x) {
+                            const auto xx = tx * 16 + x, yy = ty * 16 + y;
+                            float z = float(int((xx * 37 + yy * 101) % 1000) - 500);
+                            if (xx >= 65 || yy >= 49 || (hole && xx == 32 && yy == 24))
+                                z = NAN;
+                            integer(out, std::bit_cast<std::uint32_t>(z), 4);
+                        }
+        }
+        HeightCatalog reference({path}, HeightReference::mean_sea_level);
+        auto indexed = HeightCatalog::resident({path}, HeightReference::mean_sea_level);
+        std::mt19937 rng(123);
+        std::vector<Bounds> bounds;
+        std::vector<std::optional<double>> maxima;
+        for (int i = 0; i < 500; ++i) {
+            double x0 = rng() % 64, x1 = rng() % 64, y0 = rng() % 48, y1 = rng() % 48;
+            if (x0 > x1)
+                std::swap(x0, x1);
+            if (y0 > y1)
+                std::swap(y0, y1);
+            Bounds b{wrap_longitude(179 + x0 * .05), 2 - (y1 + .7) * .05,
+                     wrap_longitude(179 + (x1 + .8) * .05), 2 - y0 * .05};
+            bounds.push_back(b);
+            maxima.push_back(reference.upper_bound(b));
+        }
+        for (std::size_t i = 0; i < bounds.size(); ++i) {
+            check(
+                indexed.upper_bound(bounds[i]) == maxima[i],
+                "Resident pyramid must preserve cached bounds across tiles, date line and NoData");
+            for (double ceiling : {-500., 0., 250., 1000.}) {
+                const auto clear = indexed.below(bounds[i], ceiling);
+                check(!clear || (maxima[i] && *maxima[i] < ceiling),
+                      "Clearance shortcut accepted a blocked or missing rectangle");
+                check(clear == reference.below(bounds[i], ceiling),
+                      "Clearance predicate differs from cached bounds on test fixtures");
+            }
+        }
+        std::filesystem::remove(path);
+        check(indexed.upper_bound(bounds.front()) == maxima.front(),
+              "Pyramid stays usable without its source file");
+        check(indexed.cache_stats().index_bytes > 0, "Resident index memory must be reported");
+    }
     // Packaged global coverage: axes/poles and the longitude seam all have
     // samples.
     auto root = std::filesystem::path(ELYSIA_MAP_FILE).parent_path().parent_path();

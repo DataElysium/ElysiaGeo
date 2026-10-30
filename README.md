@@ -65,6 +65,22 @@ Distances and bearings are explicitly **spherical approximations**, not precise
 ellipsoidal geodesics. Altitude is ignored by surface distance. Coincident and
 antipodal bearings return `nullopt`.
 
+`SurfaceProjection` supplies Fleet's radial tangent map in one immutable, 72-byte object:
+
+```cpp
+#include <elysia_geo/surface_projection.hpp>
+geo::SurfaceProjection chart({121, 24, 0});
+auto location = chart.geographic({100000, 200000});
+auto map_point = chart.project(location); // optional: visible hemisphere
+auto metric = chart.metric({100000, 200000});
+double ground_metres = metric.length({1, 0}); // local length of one map metre east
+```
+
+Altitude stays separate. `metric` returns the analytical WGS84 surface derivative as three
+coefficients, with O(1) computation and no allocation. It measures short displacements at the
+supplied position. Long-route distance needs integration or a geodesic calculation. Map scale
+varies with position; movement, range tests and collision queries must agree on their coordinates.
+
 ## Data and scope
 
 The included approximately 960 KiB binary contains 1,421 Natural Earth 1:50 million land polygons.
@@ -178,12 +194,21 @@ auto heights = HeightCatalog::resident({"maps/global-relief/terrain.elyhgt",
                                        HeightReference::mean_sea_level);
 ```
 
-`resident()` reads all tiles sequentially and computes their maxima before returning.
+`resident()` reads all tiles sequentially and builds a shared maximum-height pyramid before returning.
 Queries use array indexing without cache locks, LRU updates or further file reads.
 Storage lasts for the catalogue's lifetime; keep it at application scope and share it
 across regions and query threads. The bundled layers occupy about 105.31 MiB of float
 allocation, shared once. `cache_stats()` reports the fixed resident allocation as both
-`bytes` and `budget_bytes`. The regular constructor retains byte-bounded LRU loading.
+`bytes` and `budget_bytes`, plus 33.64 MiB in `index_bytes` for the pyramid arrays.
+The regular constructor retains byte-bounded LRU loading.
+
+Each pyramid level stores the maximum of 2×2 values from the previous level. The base
+level reads the original tiles directly. Odd edges and single-row/column grids retain
+their valid samples; missing data prevents a clearance certificate. `upper_bound()`
+returns conservative rectangle bounds, preserving clipped bilinear bounds for small
+footprints. `below(bounds, ceiling)` can stop at a coarse node whose maximum already
+clears the requested height. These queries use stack traversal and shared immutable
+arrays; creating another theatre requires no additional height index.
 
 The finest angular cell area wins; equal resolutions prefer the smaller grid,
 then input order. NoData or uncovered positions fall back to the next source;

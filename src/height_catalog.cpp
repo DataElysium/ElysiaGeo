@@ -1,3 +1,4 @@
+#include "height_pyramid.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -26,7 +27,12 @@ struct HeightCatalog::Impl {
     mutable std::mutex mutex;
     struct ResidentLayer {
         std::vector<HeightTile> tiles;
-        std::vector<std::optional<double>> maxima;
+        HeightPyramid pyramid;
+        float value(const HeightGrid &g, std::uint32_t x, std::uint32_t y) const {
+            const auto columns = (std::size_t(g.columns) + g.tile_size - 1) / g.tile_size;
+            const auto &tile = tiles[std::size_t(y / g.tile_size) * columns + x / g.tile_size];
+            return tile.metres[std::size_t(y % g.tile_size) * tile.columns + x % g.tile_size];
+        }
     };
     std::optional<std::vector<ResidentLayer>> resident;
 
@@ -196,11 +202,12 @@ HeightCatalog HeightCatalog::resident(std::vector<std::filesystem::path> files,
     loaded.reserve(impl.maps.size());
     for (const auto &map : impl.maps) {
         Impl::ResidentLayer layer{map.read_tiles(), {}};
-        layer.maxima.reserve(layer.tiles.size());
         for (const auto &tile : layer.tiles) {
-            layer.maxima.push_back(Impl::tile_maximum(tile));
             impl.bytes += tile.metres.capacity() * sizeof(float);
         }
+        const auto &g = map.grid();
+        layer.pyramid =
+            HeightPyramid(g.columns, g.rows, [&](auto x, auto y) { return layer.value(g, x, y); });
         loaded.push_back(std::move(layer));
     }
     impl.budget = impl.bytes;
@@ -233,14 +240,25 @@ HeightCacheStats HeightCatalog::cache_stats() const {
     if (!impl_->resident)
         lock.lock();
     if (impl_->resident) {
-        std::size_t tiles = 0;
-        for (const auto &layer : *impl_->resident)
+        std::size_t tiles = 0, index_bytes = 0;
+        for (const auto &layer : *impl_->resident) {
             tiles += layer.tiles.size();
-        return {tiles, impl_->bytes, impl_->budget};
+            index_bytes += layer.pyramid.bytes();
+        }
+        return {tiles, impl_->bytes, impl_->budget, index_bytes};
     }
     return {impl_->cache.size(), impl_->bytes, impl_->budget};
 }
 std::optional<double> HeightCatalog::upper_bound(Bounds bounds) const {
+    return bound(bounds, -INFINITY);
+}
+bool HeightCatalog::below(Bounds bounds, double ceiling) const {
+    if (!std::isfinite(ceiling))
+        return false;
+    const auto maximum = bound(bounds, ceiling);
+    return maximum && double(std::nextafter(float(*maximum), INFINITY)) < ceiling;
+}
+std::optional<double> HeightCatalog::bound(Bounds bounds, double stop_below) const {
     if (!std::isfinite(bounds.west) || !std::isfinite(bounds.east) ||
         !std::isfinite(bounds.south) || !std::isfinite(bounds.north) || bounds.south < -90 ||
         bounds.north > 90 || bounds.south > bounds.north || bounds.west < -180 ||
@@ -250,8 +268,8 @@ std::optional<double> HeightCatalog::upper_bound(Bounds bounds) const {
     if (!impl_->resident)
         lock.lock();
     const bool wraps = bounds.west > bounds.east;
-    const std::array intervals{
-        std::pair{bounds.west, wraps ? 180. : bounds.east}, std::pair{-180., bounds.east}};
+    const std::array intervals{std::pair{bounds.west, wraps ? 180. : bounds.east},
+                               std::pair{-180., bounds.east}};
     double maximum = -INFINITY;
     for (std::size_t interval = 0; interval < (wraps ? 2u : 1u); ++interval) {
         const auto [west, east] = intervals[interval];
@@ -275,6 +293,21 @@ std::optional<double> HeightCatalog::upper_bound(Bounds bounds) const {
                                              0., double(g.rows - 1)));
                 const auto y1 = std::uint32_t(std::clamp(
                     std::ceil((g.north - bounds.south) / g.latitude_step), 0., double(g.rows - 1)));
+                if (impl_->resident && std::isfinite(stop_below)) {
+                    const auto &data = (*impl_->resident)[layer];
+                    const float value = data.pyramid.maximum(
+                        x0, y0, x1, y1, [&](auto x, auto y) { return data.value(g, x, y); },
+                        stop_below);
+                    if (value < stop_below) {
+                        maximum = std::max(maximum, double(value));
+                        covered |= lo >= g.west && hi <= right && bounds.south >= bottom &&
+                                   bounds.north <= g.north;
+                        continue;
+                    }
+                    // A clipped footprint can exclude a neighbouring peak or NoData.
+                    if (std::uint64_t(x1 - x0 + 1) * (y1 - y0 + 1) > 256)
+                        return {};
+                }
                 // On each bilinear cell the maximum over a rectangle is at a corner.
                 // Clip the boundary cells to the requested footprint; a distant high
                 // vertex must not raise the bound for every point in its source cell.
@@ -295,6 +328,17 @@ std::optional<double> HeightCatalog::upper_bound(Bounds bounds) const {
                                bounds.north <= g.north;
                     continue;
                 }
+                if (impl_->resident) {
+                    const auto &data = (*impl_->resident)[layer];
+                    const float value = data.pyramid.maximum(
+                        x0, y0, x1, y1, [&](auto x, auto y) { return data.value(g, x, y); });
+                    if (!std::isfinite(value))
+                        return {};
+                    maximum = std::max(maximum, double(value));
+                    covered |= lo >= g.west && hi <= right && bounds.south >= bottom &&
+                               bounds.north <= g.north;
+                    continue;
+                }
                 for (auto y = y0 / g.tile_size; y <= y1 / g.tile_size; ++y)
                     for (auto x = x0 / g.tile_size; x <= x1 / g.tile_size; ++x) {
                         std::shared_ptr<const HeightTile> held;
@@ -304,11 +348,8 @@ std::optional<double> HeightCatalog::upper_bound(Bounds bounds) const {
                         const auto top = std::max(y0, y * g.tile_size) - y * g.tile_size;
                         const auto bottom_edge = std::min(y1 - y * g.tile_size, tile->rows - 1);
                         const std::optional<double> *tile_maximum = nullptr;
-                        if (impl_->resident)
-                            tile_maximum =
-                                &(*impl_->resident)[layer].maxima[impl_->tile_index(layer, x, y)];
-                        else if (const auto cached = impl_->cache.find(Impl::Key{layer, x, y});
-                                 cached != impl_->cache.end())
+                        if (const auto cached = impl_->cache.find(Impl::Key{layer, x, y});
+                            cached != impl_->cache.end())
                             tile_maximum = &cached->second.maximum;
                         if (left == 0 && top == 0 && right_edge + 1 == tile->columns &&
                             bottom_edge + 1 == tile->rows && tile_maximum) {
