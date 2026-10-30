@@ -54,16 +54,27 @@ Position from_ecef(Vec3 p) {
     double r=std::hypot(p.x,p.y);
     if (std::hypot(r,p.z)<axis/2) throw std::invalid_argument("ECEF point too near Earth centre");
     if (r<1e-8) return {0,std::copysign(90.0,p.z),std::abs(p.z)-axis*std::sqrt(1-e2)};
-    double lat=std::atan2(p.z,r*(1-e2));
-    for (int i=0;i<16;++i) {
-        double n=axis/std::sqrt(1-e2*std::sin(lat)*std::sin(lat));
-        double next=std::atan2(p.z+e2*n*std::sin(lat),r);
-        if (std::abs(next-lat)<1e-14) { lat=next; break; }
-        lat=next;
+    // Iterate the geodetic normal as a unit vector. Latitude is only needed at
+    // the API boundary; converting it to/from angles inside the loop is costly
+    // when tracing thousands of terrain visibility rays.
+    double z = p.z, scale = std::hypot(r * (1 - e2), z);
+    double sine = z / scale, cosine = r * (1 - e2) / scale;
+    for (int i = 0; i < 16; ++i) {
+      const double n = axis / std::sqrt(1 - e2 * sine * sine);
+      z = p.z + e2 * n * sine;
+      scale = std::hypot(r, z);
+      const double next_sine = z / scale, next_cosine = r / scale;
+      const bool converged = std::max(std::abs(next_sine - sine),
+                                      std::abs(next_cosine - cosine)) < 1e-14;
+      sine = next_sine;
+      cosine = next_cosine;
+      if (converged)
+        break;
     }
-    double n=axis/std::sqrt(1-e2*std::sin(lat)*std::sin(lat));
-    double h=r*std::cos(lat)+p.z*std::sin(lat)-n*(1-e2*std::sin(lat)*std::sin(lat));
-    return {wrap_longitude(std::atan2(p.y,p.x)/rad),lat/rad,h};
+    const double n = axis / std::sqrt(1 - e2 * sine * sine);
+    const double h = r * cosine + p.z * sine - n * (1 - e2 * sine * sine);
+    return {wrap_longitude(std::atan2(p.y, p.x) / rad),
+            std::atan2(sine, cosine) / rad, h};
 }
 LocalFrame::LocalFrame(Position p):origin_(to_ecef(p)) {
     double l=wrap_longitude(p.longitude_deg)*rad, a=p.latitude_deg*rad;

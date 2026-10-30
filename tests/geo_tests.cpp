@@ -51,6 +51,25 @@ void coordinates() {
             near(q.altitude_m,altitude,1e-5,"local altitude roundtrip");
             if(std::abs(lat)<90) near(wrap_longitude(q.longitude_deg-lon),0,1e-8,"local longitude roundtrip");
         }
+    std::mt19937_64 random(0x454c59534941);
+    std::uniform_real_distribution<double> longitude(-180, 180),
+        latitude(-90, 90);
+    for (double altitude :
+         {-3000000., -11000., 0., 8000., 100000., 40000000.}) {
+      for (int i = 0; i < 2000; ++i) {
+        const Position p{longitude(random), latitude(random), altitude};
+        const auto q = from_ecef(to_ecef(p));
+        near(wrap_longitude(q.longitude_deg - p.longitude_deg), 0, 1e-10,
+             "ECEF inverse longitude over the globe");
+        near(q.latitude_deg, p.latitude_deg, 1e-10,
+             "ECEF inverse latitude below surface and at orbital altitude");
+        near(q.altitude_m, p.altitude_m, 1e-6,
+             "ECEF inverse altitude remains accurate within one micrometre");
+      }
+    }
+    const auto distant = from_ecef({1, 0, std::numeric_limits<double>::max()});
+    check(std::isfinite(distant.latitude_deg) && std::isfinite(distant.altitude_m),
+          "Normal initialization must not overflow for a finite polar ECEF point");
     auto origin=local.to_local({179.9,65,300});near(std::hypot(origin.x,origin.y,origin.z),0,1e-9,"local origin");
     Equirectangular projection{170};auto point=projection.project({-175,42,0});
     near(point.x,15,1e-9,"projection centered across dateline");
